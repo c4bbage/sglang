@@ -110,13 +110,9 @@ def _parallel_config_leaves() -> frozenset:
     )
 
 
-# Ranks and group handles: the names no configuration carries. This table is
-# their declaration, the way `arg_groups/fields/parallel.py` is the leaves' and
-# `Derived` is the widths'. A group handle names the getter that owns it,
-# because the module that builds the groups is where it lives; a rank is a
-# position in one of those groups, so it is read off the handle. `None` marks a
-# name only a stamp can answer: no coordinator knows this process's
-# attention-DP rank.
+# Ranks and group handles: the names no configuration carries. A group handle
+# names the getter that owns it; a rank is a position in one of those groups,
+# so it is read off the handle. `None` marks a stamp-only name.
 _MISSING_READ = object()
 
 
@@ -146,22 +142,17 @@ class Live(msgspec.Struct, frozen=True):
 
     source: Any = None
     doc: str = ""
-    # The `parallel_state` getter this name replaces, when the context computes
-    # the answer itself rather than calling it. Declared here so the deprecation
-    # shim stays derived from this table instead of keeping a second list.
+    # The getter this name replaces, for a name the context computes itself.
+    # Keeps the deprecation shim derived from this table.
     replaces: str = ""
-    # For a stamp-only name (`source=None`): what a reader should be told when
-    # nothing has stamped it. These names have no fallback by construction, so
-    # the message is the only thing pointing at what did not happen.
+    # For a stamp-only name (`source=None`): what a reader is told when nothing
+    # has stamped it.
     unstamped: str = ""
 
 
 _LIVE_READS: dict = {
-    # Two widths of the WORLD group: what it was built at, and what it has
-    # room for. Both are properties of the group itself. How much of that room
-    # is currently serving is elastic-EP state, owned by `ElasticEPStateManager`
-    # and asked of it directly -- a width that lives somewhere else does not
-    # become a WORLD fact by being readable from here.
+    # The WORLD group's two widths. How much of that room is currently serving
+    # is elastic-EP state, asked of `ElasticEPStateManager`.
     "launch_world_size": Live(
         source=lambda self: self.world_group.world_size,
         replaces="get_world_size",
@@ -562,10 +553,8 @@ _RANK_AND_WIDTH = (
     ("moe_ep_rank", "moe_ep_size"),
 )
 
-# `moe_dp` is absent because `initialize_model_parallel` aliases the MoE-DP
-# group to the attention-CP group when the latter is wider: there the group and
-# the name are two facts, which is the same reason `moe_dp_rank` is left off the
-# record at publish.
+# `moe_dp` is absent: the MoE-DP group is the attention-CP group when that one
+# is wider, so there the group and the name are two facts.
 _WIDTH_AND_GROUP = (
     ("tp_size", "tp_group"),
     ("pp_size", "pp_group"),
@@ -2005,12 +1994,6 @@ def publish(
     if ranks is not None and ranks.gpu_id is not None:
         _CONTEXT.override("spawn", gpu_id=ranks.gpu_id)
     if ranks is not None:
-        # The placement, worked out here rather than carried: the widths are on
-        # the bag a moment ago, and `world_rank` fixes the rest. A read of any
-        # of these then needs no process group, which is the point -- they are
-        # read long before one exists. The scoped overrides that swap a group
-        # for a draft worker sit above the record in the read chain, so a
-        # scope still wins.
         parallel = _CONTEXT.parallel
         placement = derive_spawn_ranks(
             world_rank=ranks.world_rank,
@@ -2021,23 +2004,15 @@ def publish(
             moe_dp_size=parallel.moe_dp_size,
             moe_ep_size=parallel.moe_ep_size,
         )
-        # `moe_dp_rank` is a different quantity when the MoE-DP group is
-        # aliased to the attention-CP one: the group answers the CP index,
-        # while this computes the MoE-DP index. Leave it to the group there, so
-        # one name does not mean two things.
+        # Aliased to attention-CP there, where the group answers the CP index
+        # and this computes the MoE-DP one. Leave it to the group.
         if parallel.moe_dp_size < parallel.attn_cp_size:
             placement.pop("moe_dp_rank")
-        # `dp_rank` is recorded whatever it is, None included: replicas are
-        # separate WORLD groups, so no rank implies it and `None` is the answer
-        # "no controller" rather than an absence.
+        # `None` is an answer here -- "no controller" -- not an absence.
         placement["dp_rank"] = ranks.dp_rank
         placement["launch_world_rank"] = ranks.world_rank
         placement.update(_attention_ranks(parallel, placement["tp_rank"]))
-        # One stamp, not two: the identities are checked on every write, and a
-        # half-placed process satisfies none of them.
         parallel.override_permanently(**placement)
-        # Publish established the whole layout, so every identity applies here,
-        # not just the ones the stamp happened to name.
         _validate_parallel(parallel, "publish")
     if _ROLE_NS_MODE == "record":
         # The '-' marker distinguishes a zero-read role from a process where
